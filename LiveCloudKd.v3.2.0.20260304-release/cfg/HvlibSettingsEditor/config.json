@@ -1,0 +1,104 @@
+{
+  "RegistryPath": "SOFTWARE\\LiveCloudKd\\Parameters",
+  "Parameters": [
+    {
+      "Name": "LogLevel",
+      "Description": "Logging level (0-3)",
+      "DefaultValue": 2,
+      "MinValue": 0,
+      "MaxValue": 3,
+	    "ValuesDescription": [{
+		     "0":"Error Level",
+		     "1":"Info Level 1",
+		     "2":"Info Level 2",
+		     "3":"Info Level 3"
+		  }],
+      "Category": "General",
+      "Type": "dword"
+    },
+    {
+      "Name": "UseDebugApiStopProcess",
+      "Description": "Use debug API to stop process",
+      "DefaultValue": 0,
+      "Category": "Debug",
+      "Type": "boolean"
+    },
+    {
+      "Name": "ReloadDriver",
+      "Description": "Reload driver on attach",
+      "DefaultValue": 0,
+      "Category": "General",
+      "Type": "boolean"
+    },
+    {
+      "Name": "SafeMode",
+      "Description": "Enable safe mode operations",
+      "DefaultValue": 0,
+      "Category": "General",
+      "Type": "boolean"
+    },
+    {
+      "Name": "ReplaceDecypheredKDBG",
+      "Description": "Replace deciphered KDBG",
+      "DefaultValue": 0,
+      "Category": "Advanced",
+      "Type": "boolean"
+    },
+    {
+      "Name": "FullCrashDumpEmulation",
+      "Description": "Emulate full crash dump",
+      "DefaultValue": 0,
+      "Category": "Debug",
+      "Type": "boolean"
+    },
+    {
+      "Name": "ReadMethod",
+      "Description": "Memory read method (1-3)",
+      "DefaultValue": 1,
+      "MinValue": 0,
+      "MaxValue": 4,
+	  "ValuesDescription": [{
+		"1":"ReadInterfaceHvmmDrvInternal",
+		"2":"ReadInterfaceWinHv",
+		"3":"ReadInterfaceHvmmLocal"
+	   }],
+      "Category": "Memory",
+      "Type": "dword"
+    },
+    {
+      "Name": "WriteMethod",
+      "Description": "Memory write method (1-3)",
+      "DefaultValue": 1,
+      "MinValue": 0,
+      "MaxValue": 4,
+	  "ValuesDescription": [{
+		"1":"WriteInterfaceHvmmDrvInternal",
+		"2":"WriteInterfaceWinHv",
+		"3":"WriteInterfaceHvmmLocal"
+	}],
+      "Category": "Memory",
+      "Type": "dword"
+    },
+    {
+      "Name": "VSMScan",
+      "Description": "Virtual Secure Mode scan",
+      "DefaultValue": 1,
+      "Category": "Security",
+      "Type": "boolean"
+    },
+    {
+      "Name": "ForceFreezeCPU",
+      "Description": "Force CPU freeze",
+      "DefaultValue": 0,
+      "Category": "Advanced",
+      "Type": "boolean"
+    },
+    {
+      "Name": "PausePartition",
+      "Description": "Pause partition",
+      "DefaultValue": 0,
+      "Category": "Advanced",
+      "Type": "boolean"
+    }
+  ]
+}
