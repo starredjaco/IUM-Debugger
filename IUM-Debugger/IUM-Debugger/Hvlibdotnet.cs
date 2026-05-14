@@ -1034,7 +1034,7 @@ namespace Hvlibdotnet
                 Ui.KvHex("vCPU count", NumberOfCPU.ToUInt64());
                 Ui.KvHex("VTL0 kernel base", Cr3Kernel.ToUInt64());
 
-                pacthcodenop = Enumerable.Repeat((byte)0x90, ctx.patchlen).ToArray();
+                pacthcodenop = Enumerable.Repeat((byte)0x90, ctx.PatchLength).ToArray();
                 IntPtr pacthcodeptr = Marshal.AllocHGlobal(pacthcode.Length);
                 Marshal.Copy(pacthcode, 0, pacthcodeptr, pacthcode.Length);
                 IntPtr pacthcodenopptr = Marshal.AllocHGlobal(pacthcodenop.Length);
@@ -1042,8 +1042,8 @@ namespace Hvlibdotnet
 
                 IntPtr revertcodeptr = Marshal.AllocHGlobal(revertcode.Length);
                 Marshal.Copy(revertcode, 0, revertcodeptr, revertcode.Length);
-                int retoffsetcode = (int)(ulong)ctx.retoffset & 0xfff;
-                ulong retoffsetpage = ((ulong)ctx.retoffset) & 0xfffffffffffff000;
+                int retoffsetcode = (int)(ulong)ctx.RetOffset & 0xfff;
+                ulong retoffsetpage = ((ulong)ctx.RetOffset) & 0xfffffffffffff000;
                 int magicoffsetchk = retoffsetcode & 0xf00;
                 if (magicoffsetchk > 0x400)
                 {
@@ -1057,7 +1057,7 @@ namespace Hvlibdotnet
                 {
                     magicoffsetchk = 0;
                 }
-                securekernelIumInvokeSecurePatchCheck = ctx.checkpage.Skip(magicoffsetchk).ToArray();
+                securekernelIumInvokeSecurePatchCheck = ctx.CheckPage.Skip(magicoffsetchk).ToArray();
                 int readlen = securekernelIumInvokeSecurePatchCheck.Length;
                 ulong readaddr = 0x600000;
                 ulong guestcr3 = 0x600000;
@@ -1290,7 +1290,7 @@ namespace Hvlibdotnet
                     Hvlib.ReadPhysicalMemory(partition.VmHandle, readaddrsve, onepage, vpreg);
                     Marshal.Copy(vpreg, cleanpage, 0, onepage);
 
-                    readaddr = finalsecurekernel + (ulong)ctx.patchoffset;
+                    readaddr = finalsecurekernel + (ulong)ctx.PatchOffset;
                     virtbase = TranslateLinearAddress(partition.VmHandle, guestcr3, (ulong)readaddr);
                     ret = Hvlib.WritePhysicalMemory(partition.VmHandle, virtbase, pacthcodenop.Length, pacthcodenopptr);
                     if (ret) Ui.Ok("wrote NOP sled at GPA 0x" + virtbase.ToString("x") + " (" + pacthcodenop.Length + " bytes)");

@@ -1,4 +1,4 @@
-﻿using SharpDisasm;
+using SharpDisasm;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -10,7 +10,7 @@ using Hvlibdotnet;
 using System.IO;
 using System.Reflection;
 
-namespace IUMDebugger 
+namespace IUMDebugger
 {
 
     [Flags]
@@ -205,264 +205,235 @@ namespace IUMDebugger
         private extern static IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
 
-        public static bool memcmp(byte[] dumpbytes, byte[] matchstrbytes)
+        private static IEnumerable<Instruction> WalkInstructions(Disassembler disasm, int limit)
         {
-            for (int i = 0; i < matchstrbytes.Length; i++)
+            while (true)
             {
-                if (dumpbytes[i] != matchstrbytes[i])
-                {
-                    return false;
-                }
+                var insn = disasm.NextInstruction();
+                if (insn == null || insn.Error || insn.Offset >= (ulong)(limit - 1))
+                    yield break;
+                yield return insn;
             }
+        }
 
+        private static bool IsJump(Instruction insn) =>
+            insn.Operands.Any() && insn.Operands[0].Opcode == ud_operand_code.OP_J;
+
+        private static ulong ComputeLeaTarget(Instruction insn, IntPtr funcRva) =>
+            ((ulong)funcRva + insn.Offset + (ulong)insn.Length +
+             (ulong)insn.Operands.Skip(1).FirstOrDefault().Value) & 0xffffffff;
+
+        private static int JumpTargetOffset(Instruction insn) =>
+            (int)((insn.Offset + (ulong)insn.Length + (ulong)insn.Operands[0].Value) & 0xffffffff);
+
+        private static ulong JumpTargetRva(Instruction insn, IntPtr funcRva) =>
+            ((ulong)funcRva + insn.Offset + (ulong)insn.Length + (ulong)insn.Operands[0].Value) & 0xffffffff;
+
+        private static bool NextJumpsAllTargetByte(
+            IEnumerator<Instruction> walker, byte[] dumpBytes, int totalLength,
+            byte expectedByte, int requiredCount)
+        {
+            int matches = 0;
+            while (walker.MoveNext())
+            {
+                var insn = walker.Current;
+                if (!IsJump(insn)) continue;
+
+                int target = JumpTargetOffset(insn);
+                if (target <= 0 || target >= totalLength || dumpBytes[target] != expectedByte)
+                    return false;
+
+                if (++matches >= requiredCount) return true;
+            }
+            return false;
+        }
+
+        private static bool RdxPointsToSymbol(ulong rdxValue, byte[] expected)
+        {
+            var ptr = new IntPtr((long)rdxValue + (long)_secureKernelBase);
+            var buffer = new byte[expected.Length];
+            Marshal.Copy(ptr, buffer, 0, expected.Length);
+            for (int i = 0; i < expected.Length; i++)
+                if (buffer[i] != expected[i]) return false;
             return true;
         }
 
-        static Tuple<IntPtr, int, IntPtr, byte[]> GetIumInvokeSecureServiceReturn(IntPtr GetIumInvokeSecureServiceBase)
+        private static bool TryLocatePatchSite(
+            Disassembler disasm, byte[] dumpBytes, int totalLength,
+            IntPtr funcRva, out IntPtr patchOffset, out int patchLength)
         {
-            string matchstr = "SkpsIsProcessDebuggingEnabled";
+            const byte JmpShortOpcode = 0xeb;
+            patchOffset = IntPtr.Zero;
+            patchLength = 0;
 
-            byte[] matchstrbytes = Encoding.ASCII.GetBytes(matchstr);
-
-
-            IntPtr GetIumInvokeSecureServiceBasePtr = new IntPtr((long)GetIumInvokeSecureServiceBase + (long)securekernelbase);
-
-            int readlen = 0x8000;
-            int readlenall = readlen;
-            byte jmmpbyte = 0xeb;
-            byte[] dumpbytes = new byte[readlen];
-            Marshal.Copy(GetIumInvokeSecureServiceBasePtr, dumpbytes, 0, readlen);
-            // Utils.HexDump(dumpbytes.ToList());
-            Instruction insn = null;
-            Disassembler disasm = new Disassembler(dumpbytes, ArchitectureMode.x86_64);
-            bool firstmatch = false;
-            bool nextmatch = false;
-            ulong rdxsave = 0;
-            IntPtr patchoffset = IntPtr.Zero;
-            int patchlen = 0;
-            while (true)
+            foreach (var insn in WalkInstructions(disasm, totalLength))
             {
-                insn = disasm.NextInstruction();
-                if (insn != null && !insn.Error && insn.Offset < (ulong)readlenall - 1)
+                string opString = insn.ToString();
+
+                if (!IsJump(insn))
                 {
-                    string opstr = insn.ToString();
+                    if (opString.Contains("call")) return false;
+                    continue;
+                }
+                if (!opString.Contains("jmp")) continue;
 
-                    if (opstr.Contains("lea rdx"))
+                int fetchOffset = JumpTargetOffset(insn);
+                if (fetchOffset <= 0 || fetchOffset >= totalLength) continue;
+
+                bool errorCodeFound = false;
+                for (int i = 0; i < 0x20; i++)
+                {
+                    int p = fetchOffset + i;
+                    if (p >= totalLength) break;
+
+                    if (!errorCodeFound && p + 3 < totalLength &&
+                        dumpBytes[p]     == 0x22 && dumpBytes[p + 1] == 0x00 &&
+                        dumpBytes[p + 2] == 0x00 && dumpBytes[p + 3] == 0xc0)
                     {
-                        firstmatch = true;
-
-
-                        rdxsave = ((ulong)GetIumInvokeSecureServiceBase + insn.Offset + (ulong)insn.Length + (ulong)insn.Operands.Skip(1).FirstOrDefault().Value) & 0xffffffff;
-
-
-                    }
-                    else if (!opstr.Contains("lea rcx"))
-                    {
-                        firstmatch = false;
-                    }
-
-                    if (opstr.Contains("lea rcx"))
-                    {
-                        if (firstmatch)
-                        {
-                            nextmatch = true;
-                        }
-                        else
-                        {
-                            firstmatch = false;
-                        }
+                        errorCodeFound = true;
                     }
 
-
-                    if (nextmatch)
+                    if (errorCodeFound && dumpBytes[p] == JmpShortOpcode)
                     {
-                        if (insn.Operands.Any() && (insn.Operands.FirstOrDefault().Opcode == ud_operand_code.OP_J))
-                        {
-
-
-                            IntPtr dumpbytesPtr = new IntPtr((long)rdxsave + (long)securekernelbase);
-                            readlen = matchstrbytes.Length;
-                            byte[] dumpbytesmatch = new byte[readlen];
-                            Marshal.Copy(dumpbytesPtr, dumpbytesmatch, 0, readlen);
-
-                            if (memcmp(dumpbytesmatch, matchstrbytes))
-                            {
-
-
-
-                                while (true)
-                                {
-                                    insn = disasm.NextInstruction();
-                                    if (insn != null && !insn.Error && insn.Offset < (ulong)readlenall - 1)
-                                    {
-                                        opstr = insn.ToString();
-                                        if (insn.Operands.Any() &&
-                                            (insn.Operands.FirstOrDefault().Opcode == ud_operand_code.OP_J))
-                                        {
-                                            if (opstr.Contains("jmp"))
-                                            {
-
-                                                ulong func2cuurent = (ulong)insn.Operands.FirstOrDefault().Value;
-                                                int fetchoffset =
-                                                    (int)((insn.Offset + (ulong)insn.Length + (ulong)func2cuurent) &
-                                                          0xffffffff);
-                                                if (fetchoffset > 0 && fetchoffset < readlenall
-                                                   )
-                                                {
-                                                    byte[] dumpbyteschk = new byte[]
-                                                    {
-                                                    0x22, 0, 0, 0xc0
-                                                    };
-
-                                                    bool errocdefid = false;
-                                                    for (int i = 0; i < 0x20; i++)
-                                                    {
-                                                        if (dumpbyteschk.SequenceEqual(dumpbytes.Skip(fetchoffset + i)
-                                                                .Take(4)))
-                                                        {
-                                                            errocdefid = true;
-
-                                                        }
-
-                                                        if (errocdefid && dumpbytes[fetchoffset + i] == jmmpbyte)
-                                                        {
-                                                            int startasm = fetchoffset;
-                                                            int endtasm = i + 2;
-
-                                                            dumpbytesmatch =
-                                                                dumpbytes.Skip(startasm).Take(endtasm).ToArray();
-
-                                                            patchoffset = new IntPtr((long)GetIumInvokeSecureServiceBase + (long)startasm);
-                                                            patchlen = endtasm;
-
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    if (!errocdefid | patchlen > 0)
-                                                    {
-                                                        break;
-                                                    }
-
-                                                }
-
-                                            }
-
-                                            if (patchlen > 0)
-                                            {
-                                                break;
-                                            }
-                                        }
-                                        else if (opstr.Contains("call"))
-                                        {
-                                            break;
-
-                                        }
-
-                                    }
-                                }
-
-
-                            }
-                        }
-                        else
-                        {
-                            if (!opstr.Contains("lea rcx"))
-                            {
-                                firstmatch = false;
-                                nextmatch = false;
-                            }
-                        }
-                    }
-
-
-                    if (opstr.Contains("ret"))
-                    {
-                        firstmatch = false;
-                        nextmatch = false;
-
-                        ulong skfun = ((ulong)GetIumInvokeSecureServiceBase + insn.Offset);
-                        ulong skfunpage = ((ulong)GetIumInvokeSecureServiceBase + insn.Offset) & 0xfffffffffffff000;
-                        ulong diffstart = skfun - skfunpage;
-                        ulong diffskip = insn.Offset - diffstart;
-                        return new Tuple<IntPtr, int, IntPtr, byte[]>(patchoffset, patchlen, new IntPtr((long)skfun), dumpbytes.Take((int)insn.Offset).Skip((int)diffskip).ToArray());
+                        patchOffset = new IntPtr((long)funcRva + fetchOffset);
+                        patchLength = i + 2;
+                        return true;
                     }
                 }
-            }
 
-            return new Tuple<IntPtr, int, IntPtr, byte[]>(patchoffset, patchlen, IntPtr.Zero, new byte[] { });
+                if (!errorCodeFound) return false;
+            }
+            return false;
         }
 
-        static IntPtr GetIumInvokeSecureService(IntPtr GetSkCallNormalModeBase)
+        static Tuple<IntPtr, int, IntPtr, byte[]> GetIumInvokeSecureServiceReturn(IntPtr iumInvokeSecureServiceRva)
         {
-            IntPtr GetSkCallNormalModeBasePtr = new IntPtr((long)GetSkCallNormalModeBase + (long)securekernelbase);
-            int readlen = 0x800;
-            byte clibyte = 0xfa;
-            byte[] dumpbytes = new byte[readlen];
-            Marshal.Copy(GetSkCallNormalModeBasePtr, dumpbytes, 0, readlen);
-            // Utils.HexDump(dumpbytes.ToList());
-            Disassembler disasm = new Disassembler(dumpbytes, ArchitectureMode.x86_64);
-            ulong skfunsave = 0;
-            Instruction insn = null;
+            const string TargetSymbol = "SkpsIsProcessDebuggingEnabled";
+            const int ReadLength = 0x8000;
 
+            byte[] targetSymbolBytes = Encoding.ASCII.GetBytes(TargetSymbol);
+            IntPtr iumInvokeSecureServicePtr = new IntPtr((long)iumInvokeSecureServiceRva + (long)_secureKernelBase);
+
+            byte[] dumpBytes = new byte[ReadLength];
+            Marshal.Copy(iumInvokeSecureServicePtr, dumpBytes, 0, ReadLength);
+
+            var disasm = new Disassembler(dumpBytes, ArchitectureMode.x86_64);
+
+            bool sawLeaRdx = false, sawLeaRcx = false;
+            ulong rdxValue = 0;
+            IntPtr patchOffset = IntPtr.Zero;
+            int patchLength = 0;
+
+            foreach (var insn in WalkInstructions(disasm, ReadLength))
+            {
+                string opString = insn.ToString();
+
+                if (opString.Contains("ret"))
+                {
+                    ulong retAddress = (ulong)iumInvokeSecureServiceRva + insn.Offset;
+                    int pageStart = (int)insn.Offset - (int)(retAddress & 0xfff);
+                    return new Tuple<IntPtr, int, IntPtr, byte[]>(
+                        patchOffset, patchLength,
+                        new IntPtr((long)retAddress),
+                        dumpBytes[pageStart..(int)insn.Offset]);
+                }
+
+                if (opString.Contains("lea rdx"))
+                {
+                    rdxValue = ComputeLeaTarget(insn, iumInvokeSecureServiceRva);
+                    sawLeaRdx = true;
+                    sawLeaRcx = false;
+                    continue;
+                }
+
+                if (opString.Contains("lea rcx"))
+                {
+                    sawLeaRcx = sawLeaRdx;
+                    continue;
+                }
+
+                if (sawLeaRcx && IsJump(insn) &&
+                    RdxPointsToSymbol(rdxValue, targetSymbolBytes) &&
+                    TryLocatePatchSite(disasm, dumpBytes, ReadLength,
+                        iumInvokeSecureServiceRva, out var foundOffset, out var foundLength))
+                {
+                    patchOffset = foundOffset;
+                    patchLength = foundLength;
+                }
+
+                sawLeaRdx = false;
+                sawLeaRcx = false;
+            }
+
+            throw new InvalidOperationException(
+                $"IumInvokeSecureService 'ret' not found within first 0x{ReadLength:X} bytes.");
+        }
+
+        // SkCallNormalMode contains:
+        //     call IumInvokeSecureService     ; the function we want to resolve
+        //     test ..., ...                   ; immediately followed by a test
+        //     ...
+        //     j* X                            ; two J*'s whose targets each begin
+        //     j* Y                            ; with 0xFA (cli)
+        // Match that shape and return the call target as IumInvokeSecureService.
+        static IntPtr GetIumInvokeSecureService(IntPtr skCallNormalModeRva)
+        {
+            const int ReadLength = 0x800;
+            const byte CliOpcode = 0xfa;
+            const int RequiredCliJumps = 2;
+
+            IntPtr skCallNormalModePtr = new IntPtr((long)skCallNormalModeRva + (long)_secureKernelBase);
+            byte[] dumpBytes = new byte[ReadLength];
+            Marshal.Copy(skCallNormalModePtr, dumpBytes, 0, ReadLength);
+
+            var disasm = new Disassembler(dumpBytes, ArchitectureMode.x86_64);
+            using var walker = WalkInstructions(disasm, ReadLength).GetEnumerator();
+
+            while (walker.MoveNext())
+            {
+                var callInsn = walker.Current;
+                if (!IsJump(callInsn)) continue;
+
+                ulong candidateRva = JumpTargetRva(callInsn, skCallNormalModeRva);
+
+                if (!walker.MoveNext()) break;
+                if (!walker.Current.ToString().StartsWith("test ")) continue;
+
+                if (NextJumpsAllTargetByte(walker, dumpBytes, ReadLength, CliOpcode, RequiredCliJumps))
+                    return new IntPtr((long)candidateRva);
+            }
+
+            return IntPtr.Zero;
+        }
+        static IntPtr GetSkCallNormalMode(IntPtr skAllocateNormalModePoolPtr)
+        {
+            IntPtr skAllocateNormalModePoolBase = new IntPtr((long)skAllocateNormalModePoolPtr - (long)_secureKernelBase);
+            int readLength = 0x100;
+
+            byte[] dumpBytes = new byte[readLength];
+            Marshal.Copy(skAllocateNormalModePoolPtr, dumpBytes, 0, readLength);
+            // Utils.HexDump(dumpBytes.ToList());
+            Disassembler disasm = new Disassembler(dumpBytes, ArchitectureMode.x86_64);
+
+            Instruction insn = null;
+            int callIndex = 0;
             while (true)
             {
                 insn = disasm.NextInstruction();
-                if (insn != null && !insn.Error && insn.Offset < (ulong)readlen - 1)
+                if (insn != null && !insn.Error && insn.Offset < (ulong)readLength - 1)
                 {
-                    string opstr = insn.ToString();
+                    string opString = insn.ToString();
 
-                    if (insn.Operands.Any() && (insn.Operands.FirstOrDefault().Opcode == ud_operand_code.OP_J))
+                    if (opString.Contains("call"))
                     {
-                        ulong func2cuurent = (ulong)insn.Operands.FirstOrDefault().Value;
-                        ulong skfun = ((ulong)GetSkCallNormalModeBase + insn.Offset + (ulong)insn.Length + (ulong)func2cuurent) & 0xffffffff;
-                        skfunsave = skfun;
-                        insn = disasm.NextInstruction();
-                        opstr = insn.ToString();
 
-                        if (opstr.Contains("test"))
+                        callIndex++;
+                        ulong jumpRelOffset = (ulong)insn.Operands.FirstOrDefault().Value;
+                        ulong funcAddress = ((ulong)skAllocateNormalModePoolBase + insn.Offset + (ulong)insn.Length + jumpRelOffset) & 0xffffffff;
+
+                        if (callIndex == 2)
                         {
-
-                            bool firstmatch = false;
-
-                            while (true)
-                            {
-                                insn = disasm.NextInstruction();
-                                if (insn != null && !insn.Error && insn.Offset < (ulong)readlen - 1)
-                                {
-                                    if (insn.Operands.Any() &&
-                                        (insn.Operands.FirstOrDefault().Opcode == ud_operand_code.OP_J))
-                                    {
-                                        func2cuurent = (ulong)insn.Operands.FirstOrDefault().Value;
-                                        int fetchoffset =
-                                            (int)((insn.Offset + (ulong)insn.Length + (ulong)func2cuurent) &
-                                                  0xffffffff);
-                                        if (fetchoffset > 0 && fetchoffset < readlen && dumpbytes[fetchoffset] == clibyte)
-                                        {
-
-                                            if (firstmatch)
-                                            {
-
-
-
-                                                return new IntPtr((long)skfunsave);
-                                            }
-                                            else
-                                            {
-                                                firstmatch = true;
-                                            }
-
-
-
-                                        }
-                                        else
-                                        {
-                                            break;
-                                        }
-                                    }
-
-                                }
-                            }
+                            return new IntPtr((long)funcAddress);
                         }
 
                     }
@@ -477,52 +448,8 @@ namespace IUMDebugger
 
             return IntPtr.Zero;
         }
-        static IntPtr GetSkCallNormalMode(IntPtr SkAllocateNormalModePoolPtr)
-        {
-            IntPtr SkAllocateNormalModePoolBase = new IntPtr((long)SkAllocateNormalModePoolPtr - (long)securekernelbase);
-            int readlen = 0x100;
 
-            byte[] dumpbytes = new byte[readlen];
-            Marshal.Copy(SkAllocateNormalModePoolPtr, dumpbytes, 0, readlen);
-            // Utils.HexDump(dumpbytes.ToList());
-            Disassembler disasm = new Disassembler(dumpbytes, ArchitectureMode.x86_64);
-
-            Instruction insn = null;
-            int idx = 0;
-            while (true)
-            {
-                insn = disasm.NextInstruction();
-                if (insn != null && !insn.Error && insn.Offset < (ulong)readlen - 1)
-                {
-                    string opstr = insn.ToString();
-
-                    if (opstr.Contains("call"))
-                    {
-
-                        idx++;
-                        ulong func2cuurent = (ulong)insn.Operands.FirstOrDefault().Value;
-                        ulong skfun = ((ulong)SkAllocateNormalModePoolBase + insn.Offset + (ulong)insn.Length + (ulong)func2cuurent) & 0xffffffff;
-
-                        if (idx == 2)
-                        {
-                            return new IntPtr((long)skfun);
-                        }
-
-                    }
-
-
-                }
-                else
-                {
-                    break;
-                }
-            }
-
-            return IntPtr.Zero;
-            ;
-        }
-
-        private static IntPtr securekernelbase;
+        private static IntPtr _secureKernelBase;
 
         static void Main(string[] args)
         {
@@ -531,68 +458,68 @@ namespace IUMDebugger
 
             try
             {
-                string exedir = AppContext.BaseDirectory;
-                string securekernelpath = Path.Combine(exedir, "securekernel.exe");
+                string exeDir = AppContext.BaseDirectory;
+                string secureKernelPath = Path.Combine(exeDir, "securekernel.exe");
 
                 Ui.Section("Stage 1 · Static analysis of securekernel.exe");
 
-                if (!File.Exists(securekernelpath))
+                if (!File.Exists(secureKernelPath))
                 {
                     Ui.Err("securekernel.exe not found next to the executable.");
-                    Ui.Kv("looked in", exedir);
+                    Ui.Kv("looked in", exeDir);
                     return;
                 }
 
-                securekernelbase = LoadLibraryEx(securekernelpath, IntPtr.Zero, LoadLibraryFlags.DONT_RESOLVE_DLL_REFERENCES);
-                if (securekernelbase == IntPtr.Zero)
+                _secureKernelBase = LoadLibraryEx(secureKernelPath, IntPtr.Zero, LoadLibraryFlags.DONT_RESOLVE_DLL_REFERENCES);
+                if (_secureKernelBase == IntPtr.Zero)
                 {
                     Ui.Err("LoadLibraryEx failed (error " + Marshal.GetLastWin32Error() + ").");
                     return;
                 }
                 Ui.Ok("securekernel.exe loaded");
-                Ui.KvHex("module base", securekernelbase);
+                Ui.KvHex("module base", _secureKernelBase);
 
-                IntPtr SkAllocateNormalModePoolPtr = GetProcAddress(securekernelbase, "SkAllocateNormalModePool");
-                if (SkAllocateNormalModePoolPtr == IntPtr.Zero)
+                IntPtr skAllocateNormalModePoolPtr = GetProcAddress(_secureKernelBase, "SkAllocateNormalModePool");
+                if (skAllocateNormalModePoolPtr == IntPtr.Zero)
                 {
                     Ui.Err("Export SkAllocateNormalModePool not found.");
                     return;
                 }
-                Ui.KvHex("SkAllocateNormalModePool", SkAllocateNormalModePoolPtr);
+                Ui.KvHex("SkAllocateNormalModePool", skAllocateNormalModePoolPtr);
 
-                IntPtr GetSkCallNormalModeBase = GetSkCallNormalMode(SkAllocateNormalModePoolPtr);
-                if (GetSkCallNormalModeBase == IntPtr.Zero)
+                IntPtr skCallNormalModeRva = GetSkCallNormalMode(skAllocateNormalModePoolPtr);
+                if (skCallNormalModeRva == IntPtr.Zero)
                 {
                     Ui.Err("Could not resolve SkCallNormalMode.");
                     return;
                 }
                 Ui.Ok("SkCallNormalMode resolved");
-                Ui.KvHex("RVA", GetSkCallNormalModeBase);
+                Ui.KvHex("RVA", skCallNormalModeRva);
 
-                IntPtr GetIumInvokeSecureServiceBase = GetIumInvokeSecureService(GetSkCallNormalModeBase);
-                if (GetIumInvokeSecureServiceBase == IntPtr.Zero)
+                IntPtr iumInvokeSecureServiceRva = GetIumInvokeSecureService(skCallNormalModeRva);
+                if (iumInvokeSecureServiceRva == IntPtr.Zero)
                 {
                     Ui.Err("Could not resolve IumInvokeSecureService.");
                     return;
                 }
                 Ui.Ok("IumInvokeSecureService resolved");
-                Ui.KvHex("RVA", GetIumInvokeSecureServiceBase);
+                Ui.KvHex("RVA", iumInvokeSecureServiceRva);
 
-                Tuple<IntPtr, int, IntPtr, byte[]> ptach = GetIumInvokeSecureServiceReturn(GetIumInvokeSecureServiceBase);
-                IntPtr patchoffset = ptach.Item1;
-                int patchlen = ptach.Item2;
-                IntPtr retoffset = ptach.Item3;
-                byte[] checkpag = ptach.Item4;
+                Tuple<IntPtr, int, IntPtr, byte[]> patchResult = GetIumInvokeSecureServiceReturn(iumInvokeSecureServiceRva);
+                IntPtr patchOffset = patchResult.Item1;
+                int patchLength = patchResult.Item2;
+                IntPtr retOffset = patchResult.Item3;
+                byte[] checkPage = patchResult.Item4;
 
                 Ui.Ok("ret instruction & patch site located");
-                Ui.KvHex("ret address (RVA)", retoffset);
-                Ui.KvHex("patch site (RVA)", patchoffset);
-                Ui.KvHex("patch length", patchlen);
-                Ui.KvHex("page-prefix bytes captured", checkpag.Length);
+                Ui.KvHex("ret address (RVA)", retOffset);
+                Ui.KvHex("patch site (RVA)", patchOffset);
+                Ui.KvHex("patch length", patchLength);
+                Ui.KvHex("page-prefix bytes captured", checkPage.Length);
                 Ui.Info("first 16 bytes of capture pattern:");
-                Ui.HexDump(checkpag.Take(16).ToArray());
+                Ui.HexDump(checkPage.Take(16).ToArray());
 
-                SecurekernelCtx ctx = new SecurekernelCtx(patchoffset, patchlen, retoffset, checkpag);
+                SecurekernelCtx ctx = new SecurekernelCtx(patchOffset, patchLength, retOffset, checkPage);
                 SecurekernelPatch.Patch(ctx);
             }
             catch (Exception e)
@@ -606,18 +533,18 @@ namespace IUMDebugger
 
     public class SecurekernelCtx
     {
-        public IntPtr patchoffset;
-        public int patchlen;
-        public IntPtr retoffset;
+        public IntPtr PatchOffset;
+        public int PatchLength;
+        public IntPtr RetOffset;
 
-        public byte[] checkpage;
+        public byte[] CheckPage;
 
-        public SecurekernelCtx(IntPtr patchoffset, int patchlen, IntPtr retoffset, byte[] checkpage)
+        public SecurekernelCtx(IntPtr patchOffset, int patchLength, IntPtr retOffset, byte[] checkPage)
         {
-            this.patchoffset = patchoffset;
-            this.patchlen = patchlen;
-            this.retoffset = retoffset;
-            this.checkpage = checkpage;
+            this.PatchOffset = patchOffset;
+            this.PatchLength = patchLength;
+            this.RetOffset = retOffset;
+            this.CheckPage = checkPage;
         }
     }
 }
